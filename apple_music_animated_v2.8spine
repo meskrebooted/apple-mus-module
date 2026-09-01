@@ -1,0 +1,216 @@
+// Apple Music Animated Artwork Module - v2.0.0
+// Fix: in-memory cache, pre-fetch, explicit clear on no result, robust token handling
+
+const TOKEN_KEY = 'apple_music_web_token_v2';
+const ARTWORK_CACHE = {};     // { albumId_country: url | null }
+const ARTIST_CACHE = {};      // { artistId_country: url | null }
+const PREFETCH_QUEUE = {};    // { albumId: Promise }
+
+// ─── Token ───────────────────────────────────────────────────────────────────
+
+let _tokenPromise = null;
+
+const fetchFreshToken = () => {
+    return fetch('https://music.apple.com/us/browse')
+        .then(r => r.text())
+        .then(html => {
+            const match = html.match(/crossorigin src="(\/assets\/index[^"]+\.js)"/);
+            if (!match) throw new Error('index.js not found');
+            return fetch('https://music.apple.com' + match[1]);
+        })
+        .then(r => r.text())
+        .then(js => {
+            const match = js.match(/(eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)/);
+            if (!match) throw new Error('JWT not found');
+            return match[1];
+        });
+};
+
+const getToken = () => {
+    // Avoid concurrent token fetches
+    if (_tokenPromise) return _tokenPromise;
+
+    _tokenPromise = AsyncStorage.getItem(TOKEN_KEY)
+        .then(cached => {
+            if (cached) {
+                // Quick expiry check on JWT payload
+                try {
+                    const payload = JSON.parse(atob(cached.split('.')[1]));
+                    if (payload.exp && payload.exp * 1000 > Date.now() + 60000) {
+                        return cached; // still valid for >1 min
+                    }
+                } catch (_) {}
+            }
+            return fetchFreshToken()
+                .then(token => AsyncStorage.setItem(TOKEN_KEY, token).then(() => token));
+        })
+        .catch(err => {
+            console.error('[AM-Animated] Token error:', err);
+            return null;
+        })
+        .finally(() => { _tokenPromise = null; });
+
+    return _tokenPromise;
+};
+
+const invalidateToken = () => {
+    _tokenPromise = null;
+    return AsyncStorage.removeItem(TOKEN_KEY);
+};
+
+// ─── Fetch helper ─────────────────────────────────────────────────────────────
+
+const apiFetch = (url) => {
+    return getToken().then(token => {
+        if (!token) return null;
+
+        const doFetch = (t) => fetch(url, {
+            headers: {
+                'Authorization': 'Bearer ' + t,
+                'Origin': 'https://music.apple.com'
+            }
+        });
+
+        return doFetch(token).then(res => {
+            if (res.status === 401) {
+                return invalidateToken()
+                    .then(() => getToken())
+                    .then(newToken => newToken ? doFetch(newToken) : null);
+            }
+            return res;
+        });
+    });
+};
+
+// ─── Video picker ─────────────────────────────────────────────────────────────
+
+const pickAlbumVideo = (ev, type) => {
+    if (!ev) return null;
+    if (type === 'square') {
+        return ev.motionDetailSquare
+            || ev.motionSquareVideo1x1
+            || ev.motionDetailTall
+            || ev.motionArtistFullscreen16x9
+            || null;
+    }
+    return ev.motionDetailTall
+        || ev.motionDetailSquare
+        || ev.motionSquareVideo1x1
+        || ev.motionArtistFullscreen16x9
+        || null;
+};
+
+const pickArtistVideo = (ev, type) => {
+    if (!ev) return null;
+    if (type === 'square') {
+        return ev.motionArtistSquare1x1
+            || ev.motionSquareVideo1x1
+            || ev.motionArtistFullscreen16x9
+            || null;
+    }
+    return ev.motionArtistFullscreen16x9
+        || ev.motionArtistSquare1x1
+        || ev.motionSquareVideo1x1
+        || null;
+};
+
+// ─── Core fetchers ────────────────────────────────────────────────────────────
+
+const _fetchAlbumArtwork = (albumId, country, type) => {
+    const cacheKey = albumId + '_' + country + '_' + type;
+    if (cacheKey in ARTWORK_CACHE) {
+        return Promise.resolve(ARTWORK_CACHE[cacheKey]);
+    }
+
+    const url = 'https://amp-api.music.apple.com/v1/catalog/' + country
+        + '/albums/' + albumId + '?extend=editorialVideo';
+
+    return apiFetch(url)
+        .then(res => (res && res.ok) ? res.json() : null)
+        .then(json => {
+            const ev = json
+                && json.data
+                && json.data[0]
+                && json.data[0].attributes
+                && json.data[0].attributes.editorialVideo;
+
+            const videoData = pickAlbumVideo(ev || null, type);
+            const result = (videoData && videoData.video) ? videoData.video : '';
+
+            ARTWORK_CACHE[cacheKey] = result;
+            return result;
+        })
+        .catch(err => {
+            console.error('[AM-Animated] Album fetch error:', err);
+            return '';
+        });
+};
+
+const _fetchArtistArtwork = (artistId, country, type) => {
+    const cacheKey = artistId + '_' + country + '_' + type;
+    if (cacheKey in ARTIST_CACHE) {
+        return Promise.resolve(ARTIST_CACHE[cacheKey]);
+    }
+
+    const url = 'https://amp-api.music.apple.com/v1/catalog/' + country
+        + '/artists/' + artistId + '?extend=editorialVideo';
+
+    return apiFetch(url)
+        .then(res => (res && res.ok) ? res.json() : null)
+        .then(json => {
+            const ev = json
+                && json.data
+                && json.data[0]
+                && json.data[0].attributes
+                && json.data[0].attributes.editorialVideo;
+
+            const videoData = pickArtistVideo(ev || null, type);
+            const result = (videoData && videoData.video) ? videoData.video : '';
+
+            ARTIST_CACHE[cacheKey] = result;
+            return result;
+        })
+        .catch(err => {
+            console.error('[AM-Animated] Artist fetch error:', err);
+            return '';
+        });
+};
+
+// ─── Module export ────────────────────────────────────────────────────────────
+
+return {
+    id: "apple-music-animated-scraper",
+    name: "Apple Music Animated v2",
+    version: "2.0.0",
+    description: "Animated artwork via Apple Music API. Cache in-memory, pre-fetch, explicit clear on missing artwork.",
+
+    // Chiamato da 8SPINE per la traccia corrente
+    getAnimatedArtwork: (albumId, country, type) => {
+        country = country || 'us';
+        type = type || 'tall';
+        return _fetchAlbumArtwork(albumId, country, type);
+    },
+
+    getAnimatedArtistArtwork: (artistId, country, type) => {
+        country = country || 'us';
+        type = type || 'tall';
+        return _fetchArtistArtwork(artistId, country, type);
+    },
+
+    // Pre-fetch chiamabile da 8SPINE prima del cambio traccia
+    prefetchAnimatedArtwork: (albumId, country, type) => {
+        country = country || 'us';
+        type = type || 'tall';
+        const cacheKey = albumId + '_' + country + '_' + type;
+        if (!(cacheKey in ARTWORK_CACHE) && !PREFETCH_QUEUE[cacheKey]) {
+            PREFETCH_QUEUE[cacheKey] = _fetchAlbumArtwork(albumId, country, type)
+                .finally(() => { delete PREFETCH_QUEUE[cacheKey]; });
+        }
+    },
+
+    // Svuota cache (utile se l'utente vuole forzare un refresh)
+    clearCache: () => {
+        Object.keys(ARTWORK_CACHE).forEach(k => delete ARTWORK_CACHE[k]);
+        Object.keys(ARTIST_CACHE).forEach(k => delete ARTIST_CACHE[k]);
+    }
+};
