@@ -1,0 +1,21 @@
+{
+  "category:artwork": [
+    {
+      "id": "apple-music-animated-scraper",
+      "name": "APPLE MUSIC ANIMATED v2",
+      "pkg": "com.8spine.module.apple.music.animated.v2",
+      "file": "apple_music_animated_v2.8spine",
+      "download": "https://raw.githubusercontent.com/meskrebooted/apple-mus-module/main/apple_music_animated_v2.8spine",
+      "version": "v2.0.0",
+      "code": 200,
+      "type": "ARTWORK",
+      "author": "Adam",
+      "description": "Animated artwork via Apple Music API. In-memory cache, pre-fetch, explicit clear.",
+      "tags": [],
+      "featured": false,
+      "trusted": false,
+      "nsfw": false,
+      "lang": "all"
+    }
+  ]
+}
